@@ -431,6 +431,12 @@ def main() -> None:
     for executable in (FFMPEG, FFPROBE):
         if not executable.is_file():
             sys.exit(f"변환 엔진을 찾지 못했습니다: {executable}")
+        try:
+            check = subprocess.run([str(executable), "-version"], capture_output=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            sys.exit(f"변환 엔진을 실행할 수 없습니다: {executable.name} ({exc})")
+        if check.returncode:
+            sys.exit(f"변환 엔진을 실행할 수 없습니다: {executable.name}")
     OUTPUT.mkdir(exist_ok=True)
     try:
         server = LocalHTTPServer(("127.0.0.1", 38927), Handler)
