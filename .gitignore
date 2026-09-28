@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build_260928/
+builddeps/
+dist_260928/
+ffmpeg_unpack/
+ffmpeg-release-essentials.zip
+ffmpeg-release-essentials.zip.sha256
+output_260928/
+runtime/
+test_data_260928/
