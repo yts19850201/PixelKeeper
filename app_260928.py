@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -219,6 +220,15 @@ def convert(source: Path, original_name: str, requested: str, quality: str, prog
     }
 
 
+class LocalHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:
         print(fmt % args)
@@ -270,6 +280,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/health":
+            self.json_response(200, {"service": "PixelKeeper", "version": "v4"})
+            return
         if path.startswith("/api/jobs/"):
             job_id = path.removeprefix("/api/jobs/")
             with LOCK:
@@ -375,7 +388,10 @@ def main() -> None:
         if not executable.is_file():
             sys.exit(f"변환 엔진을 찾지 못했습니다: {executable}")
     OUTPUT.mkdir(exist_ok=True)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    try:
+        server = LocalHTTPServer(("127.0.0.1", 38927), Handler)
+    except OSError:
+        server = LocalHTTPServer(("127.0.0.1", 0), Handler)
     url = f"http://127.0.0.1:{server.server_port}"
     print(f"로컬 미디어 최적화 도구: {url}", flush=True)
     print(f"결과 폴더: {OUTPUT}", flush=True)
