@@ -27,7 +27,7 @@ PAGE = ASSETS / "index_260928.html"
 FFMPEG = ASSETS / "runtime" / "ffmpeg.exe"
 FFPROBE = ASSETS / "runtime" / "ffprobe.exe"
 MAX_UPLOAD = 1024 * 1024 * 1024
-IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".avif", ".gif", ".apng"}
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".avif", ".gif", ".apng", ".svg"}
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 SETTINGS = {
     "high": {"webp": "90", "avif": "25", "h264": "18", "vp9": "25", "jpeg": "92"},
@@ -82,15 +82,23 @@ def media_kind(path: Path, info: dict) -> str:
     ext = path.suffix.lower()
     if ext in VIDEO_EXT:
         return "video"
-    if ext in {".gif", ".apng"}:
-        return "animated"
-    if ext in {".webp", ".avif"} and has_multiple_frames(path, info):
+    if ext in {".gif", ".apng", ".webp", ".avif"} and has_multiple_frames(path, info):
         return "animated"
     return "image"
 
 def command(source: Path, target: Path, fmt: str, kind: str, quality: str, stream_index: int) -> list[str]:
     q = SETTINGS[quality]
-    args = [str(FFMPEG), "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-map", f"0:{stream_index}", "-an", "-sn"]
+    args = [str(FFMPEG), "-hide_banner", "-loglevel", "error", "-y", "-i", str(source)]
+    if fmt == "gif":
+        colors = {"high": 256, "balanced": 128, "compact": 64}[quality]
+        dither = "sierra2_4a" if quality == "high" else "bayer:bayer_scale=5"
+        palette = (f"[0:{stream_index}]split[colors][frames];"
+                   f"[colors]palettegen=max_colors={colors}:stats_mode=full:reserve_transparent=1[palette];"
+                   f"[frames][palette]paletteuse=dither={dither}[out]")
+        args += ["-filter_complex", palette, "-map", "[out]", "-an", "-sn"]
+        args += ["-frames:v", "1"] if kind == "image" else ["-loop", "0"]
+        return args + [str(target)]
+    args += ["-map", f"0:{stream_index}", "-an", "-sn"]
     if kind == "image":
         args += ["-frames:v", "1"]
     if fmt == "webp":
@@ -147,7 +155,8 @@ def run_with_progress(args: list[str], duration: float, progress) -> tuple[int, 
             process.wait()
 
 
-def convert(source: Path, original_name: str, requested: str, quality: str, progress=None) -> dict:
+def convert(source: Path, original_name: str, requested: str, quality: str, progress=None,
+            original_source: Path | None = None) -> dict:
     progress = progress or (lambda percent, stage: None)
     progress(0, "파일 분석 중")
     if quality not in SETTINGS:
@@ -156,7 +165,7 @@ def convert(source: Path, original_name: str, requested: str, quality: str, prog
     kind = media_kind(source, before)
     choices = (["webp", "avif"] if kind == "image" else ["webp", "mp4", "webm"])
     if requested != "auto":
-        allowed = {"webp", "avif", "jpg", "png"} if kind == "image" else {"webp", "avif", "mp4", "webm"}
+        allowed = {"webp", "avif", "jpg", "png", "gif"} if kind == "image" else {"webp", "avif", "mp4", "webm", "gif"}
         if requested not in allowed:
             raise ValueError("선택한 형식은 이 파일에 사용할 수 없습니다.")
         choices = [requested]
@@ -188,7 +197,7 @@ def convert(source: Path, original_name: str, requested: str, quality: str, prog
             errors.append(f"{fmt}: {exc}")
             dest.unlink(missing_ok=True)
         progress(min(99, round((index + 1) / len(choices) * 100)), "결과 확인 중")
-    original_size = source.stat().st_size
+    original_size = (original_source or source).stat().st_size
     if requested == "auto":
         smaller = [item for item in candidates if item[0] < original_size]
         if smaller:
@@ -197,7 +206,7 @@ def convert(source: Path, original_name: str, requested: str, quality: str, prog
         else:
             ext = Path(original_name).suffix.lower() or ".bin"
             dest = job_dir / f"{safe_stem}_original_{datetime.now():%y%m%d}{ext}"
-            shutil.copy2(source, dest)
+            shutil.copy2(original_source or source, dest)
             chosen = (original_size, dest, "original")
             status = "해상도를 유지하며 더 작게 만든 결과가 없어 원본을 보관했습니다."
     else:
@@ -218,6 +227,25 @@ def convert(source: Path, original_name: str, requested: str, quality: str, prog
         "width": before["width"], "height": before["height"], "seconds": round(time.monotonic() - started, 1),
         "message": status, "download": "/download/" + token, "preview": "/preview/" + token, "notes": errors,
     }
+
+
+def receive_upload(stream, count: int, suffix: str) -> Path:
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="media_input_", suffix=suffix, delete=False) as handle:
+            path = Path(handle.name)
+            remaining = count
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("파일 수신이 중단되었습니다.")
+                handle.write(chunk)
+                remaining -= len(chunk)
+        return path
+    except Exception:
+        if path is not None:
+            path.unlink(missing_ok=True)
+        raise
 
 
 class LocalHTTPServer(ThreadingHTTPServer):
@@ -243,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def preview_response(self, file: Path) -> None:
         mime = {".webm": "video/webm", ".mp4": "video/mp4", ".webp": "image/webp",
-                ".avif": "image/avif", ".gif": "image/gif", ".jpg": "image/jpeg",
+                ".avif": "image/avif", ".gif": "image/gif", ".svg": "image/svg+xml", ".jpg": "image/jpeg",
                 ".jpeg": "image/jpeg", ".png": "image/png"}.get(file.suffix.lower(), "application/octet-stream")
         size = file.stat().st_size
         start, end = 0, size - 1
@@ -265,6 +293,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if mime == "image/svg+xml":
+            self.send_header("Content-Security-Policy", "sandbox")
         if range_header:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
@@ -281,7 +312,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/health":
-            self.json_response(200, {"service": "PixelKeeper", "version": "v4"})
+            self.json_response(200, {"service": "PixelKeeper", "version": "v5"})
             return
         if path.startswith("/api/jobs/"):
             job_id = path.removeprefix("/api/jobs/")
@@ -340,18 +371,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         requested = params.get("format", ["auto"])[0]
         quality = params.get("quality", ["high"])[0]
+        svg_upload = params.get("svg", ["0"])[0] == "1"
+        if (ext == ".svg") != svg_upload:
+            self.json_response(400, {"error": "SVG는 프로그램 화면에서 등록해 주세요."})
+            return
         async_job = parsed.path == "/api/jobs"
         handed_off = False
+        temp = None
+        svg_original = None
         try:
-            with tempfile.NamedTemporaryFile(prefix="media_input_", suffix=ext, delete=False) as handle:
-                temp = Path(handle.name)
-                remaining = int(length)
-                while remaining:
-                    chunk = self.rfile.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        raise ValueError("파일 수신이 중단되었습니다.")
-                    handle.write(chunk)
-                    remaining -= len(chunk)
+            if svg_upload:
+                header = self.rfile.read(8)
+                if len(header) != 8:
+                    raise ValueError("SVG 파일 수신이 중단되었습니다.")
+                svg_size = int.from_bytes(header, "big")
+                if not 0 < svg_size < int(length) - 8:
+                    raise ValueError("SVG 파일 데이터가 올바르지 않습니다.")
+                svg_original = receive_upload(self.rfile, svg_size, ".svg")
+                temp = receive_upload(self.rfile, int(length) - 8 - svg_size, ".png")
+            else:
+                temp = receive_upload(self.rfile, int(length), ext)
             if async_job:
                 job_id = uuid.uuid4().hex
                 with LOCK:
@@ -361,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
                         with LOCK:
                             JOBS[job_id].update(progress=percent, stage=stage)
                     try:
-                        result = convert(temp, name, requested, quality, update)
+                        result = convert(temp, name, requested, quality, update, svg_original)
                         with LOCK:
                             JOBS[job_id].update(state="done", progress=100, stage="완료", result=result)
                     except Exception as exc:
@@ -369,18 +408,23 @@ class Handler(BaseHTTPRequestHandler):
                             JOBS[job_id].update(state="error", stage="오류", error=str(exc))
                     finally:
                         temp.unlink(missing_ok=True)
+                        if svg_original is not None:
+                            svg_original.unlink(missing_ok=True)
                 threading.Thread(target=worker, daemon=True).start()
                 handed_off = True
                 self.json_response(202, {"job_id": job_id})
             else:
-                self.json_response(200, convert(temp, name, requested, quality))
+                self.json_response(200, convert(temp, name, requested, quality, original_source=svg_original))
         except (ValueError, subprocess.TimeoutExpired) as exc:
             self.json_response(400, {"error": str(exc)})
         except Exception as exc:
             self.json_response(500, {"error": f"처리 중 오류가 발생했습니다: {exc}"})
         finally:
-            if "temp" in locals() and not handed_off:
-                temp.unlink(missing_ok=True)
+            if not handed_off:
+                if temp is not None:
+                    temp.unlink(missing_ok=True)
+                if svg_original is not None:
+                    svg_original.unlink(missing_ok=True)
 
 
 def main() -> None:
