@@ -1,7 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
+import subprocess
 
 ROOT = Path(SPECPATH)
+
+for name in ('ffmpeg.exe', 'ffprobe.exe'):
+    binary = ROOT / 'runtime' / name
+    try:
+        check = subprocess.run([str(binary), '-version'], capture_output=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f'Invalid conversion engine: {binary}') from exc
+    if check.returncode != 0 or not check.stdout.lower().startswith(name.removesuffix('.exe').encode()):
+        raise RuntimeError(f'Invalid conversion engine: {binary}')
 
 
 a = Analysis(
