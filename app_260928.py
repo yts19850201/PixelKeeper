@@ -312,7 +312,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/health":
-            self.json_response(200, {"service": "PixelKeeper", "version": "v5"})
+            self.json_response(200, {"service": "PixelKeeper", "version": "v3.2"})
             return
         if path.startswith("/api/jobs/"):
             job_id = path.removeprefix("/api/jobs/")
